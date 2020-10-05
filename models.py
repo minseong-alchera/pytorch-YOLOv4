@@ -449,7 +449,7 @@ class Yolov4(nn.Module):
         return output
 
 
-if __name__ == "__main__":
+def main():
     import sys
     import cv2
 
@@ -502,8 +502,90 @@ if __name__ == "__main__":
             namesfile = 'data/voc.names'
         elif n_classes == 80:
             namesfile = 'data/coco.names'
+        elif n_classes == 1:
+            namesfile = 'data/smoke.names'
         else:
             print("please give namefile")
 
     class_names = load_class_names(namesfile)
     plot_boxes_cv2(img, boxes[0], 'predictions.jpg', class_names)
+
+def eval_mskim():
+    import os
+    import cv2
+    import pickle
+    import argparse
+    import numpy as np
+
+    from tool.utils import load_class_names, plot_boxes_cv2
+    from tool.torch_utils import do_detect
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n_classes', default=1)
+    parser.add_argument('--weightfile', default='checkpoints/Yolov4_epoch10.pth')
+    parser.add_argument('--imgfile', default='data/mskim/test90_10percent.txt')
+    parser.add_argument('--size', type=int, nargs='+', default=[608, 608])
+    parser.add_argument('--namesfile', default='data/smoke.names')
+    parser.add_argument('--nms_th', default=0.6)
+    parser.add_argument('--conf_th', default=0.4)
+    parser.add_argument('--save_path', default='predictions/')
+    parser.add_argument('--save_image', default=False, action='store_true')
+    args = parser.parse_args()
+
+    target_h, target_w = args.size
+
+    model = Yolov4(yolov4conv137weight=None, n_classes=args.n_classes, inference=True)
+
+    pretrained_dict = torch.load(args.weightfile, map_location=torch.device('cuda'))
+    model.load_state_dict(pretrained_dict)
+
+    use_cuda = True
+    if use_cuda:
+        model.cuda()
+
+    with open(args.imgfile, 'r') as f:
+        img_file_lst = [line.strip() for line in f.readlines()]
+    common_path = os.path.commonpath(img_file_lst)
+
+    prediction_results = {}
+    class_names = load_class_names(args.namesfile)
+    for img_file in img_file_lst:
+        # origin image
+        img = cv2.imread(img_file)
+        
+        origin_h, origin_w = img.shape[:2]
+
+        sized = cv2.resize(img, (target_w, target_h))
+        sized = cv2.cvtColor(sized, cv2.COLOR_BGR2RGB)
+
+        # argument of do_detect: (model, img, conf_thresh, nms_thresh, use_cuda=1)
+        boxes = do_detect(model, sized, args.conf_th, args.nms_th, use_cuda)
+        boxes_np = np.asarray(boxes) # shape: (1, 0) or (1, N, 7) [7: xmin, ymin, xmax, ymax, score, id]
+
+        if boxes_np.shape[1] == 0:
+            pred = np.zeros((1, 5))
+        else:
+            # box coordinates are normalized to 0 ~ 1
+            pred = boxes_np[0, :, :-1]
+            # resize to origin image scale
+            pred[:, 0] = pred[:, 0] * origin_w
+            pred[:, 1] = pred[:, 1] * origin_h
+            pred[:, 2] = pred[:, 2] * origin_w
+            pred[:, 3] = pred[:, 3] * origin_h
+        prediction_results[os.path.relpath(img_file, common_path)] = pred
+
+        # save prediction results
+        if args.save_image:
+            filename = os.path.basename(img_file)
+            dirname = os.path.dirname(img_file)
+            rel_dir = os.path.relpath(dirname, common_path)
+            _save_path = os.path.join(args.save_path, rel_dir)
+            os.makedirs(_save_path, exist_ok=True)
+            plot_boxes_cv2(img, boxes[0], os.path.join(_save_path, filename), class_names)
+
+    with open(os.path.join(args.save_path, 'prediction_results.pickle'), 'wb') as f:
+        pickle.dump(prediction_results, f)
+
+if __name__ == "__main__":
+    #main()
+    eval_mskim()
